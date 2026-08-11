@@ -445,13 +445,15 @@ func (executor *RollingUpdateExecutor) scaleDownOld(
 			executor.Record.Eventf(ds, nil, corev1.EventTypeNormal, EventReasonScalingDown,
 				"Update", "Scaling down %s LWS %s from %d to %d replicas", name, lwsName, replicas, newReplicas[name])
 
-			if triggersCoordinated[name] || !anyTriggered {
-				budget[i] -= plannedDrain[name]
+			actualDrain := replicas - newReplicas[name]
+			budget[i] -= actualDrain
+			if budget[i] < 0 {
+				budget[i] = 0
 			}
 		}
 
 		// Sequential drain: stop after this revision to ensure only one revision drains per cycle.
-		// This guarantees newest-first ordering (B fully drains before A starts draining).
+		// This guarantees newest-first ordering.
 		// The controller will requeue and process the next revision in the next cycle.
 		break
 	}
