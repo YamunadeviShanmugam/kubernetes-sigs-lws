@@ -386,6 +386,20 @@ func (executor *RollingUpdateExecutor) scaleDownOld(
 			break
 		}
 
+		// Check if this revision has any replicas > 0. Skip fully-drained revisions.
+		hasReplicas := false
+		for _, name := range roleNames {
+			if lws, exists := wl.Roles[name]; exists {
+				if getLWSReplicas(lws) > 0 {
+					hasReplicas = true
+					break
+				}
+			}
+		}
+		if !hasReplicas {
+			continue
+		}
+
 		newReplicas := make(map[string]int)
 		plannedDrain := make(map[string]int)
 		triggersCoordinated := make(map[string]bool)
@@ -435,6 +449,11 @@ func (executor *RollingUpdateExecutor) scaleDownOld(
 				budget[i] -= plannedDrain[name]
 			}
 		}
+
+		// Sequential drain: stop after this revision to ensure only one revision drains per cycle.
+		// This guarantees newest-first ordering (B fully drains before A starts draining).
+		// The controller will requeue and process the next revision in the next cycle.
+		break
 	}
 	return nil
 }
