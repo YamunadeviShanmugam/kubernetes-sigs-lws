@@ -16,6 +16,7 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -403,7 +405,12 @@ var _ = ginkgo.Describe("leaderWorkerSet e2e tests", func() {
 		testing.UpdateWorkerTemplate(ctx, k8sClient, lws)
 
 		testing.ExpectValidLeaderStatefulSet(ctx, k8sClient, lws, 7)
-		testing.ExpectValidServices(ctx, k8sClient, lws, 7)
+		// The ordinal rolling update can foreground-delete stale leader pods
+		// to advance the rollout, briefly removing their headless services,
+		// so the total service count in the namespace is not stable while
+		// the surge is in flight. Verify the surge replicas get their own
+		// headless services instead.
+		testing.ExpectValidSurgeServices(ctx, k8sClient, lws, 4, 7)
 		// Rolling update completes.
 		testing.ExpectValidLeaderStatefulSet(ctx, k8sClient, lws, 4)
 		testing.ExpectValidWorkerStatefulSets(ctx, lws, k8sClient, true)
@@ -773,9 +780,12 @@ var _ = ginkgo.Describe("leaderWorkerSet e2e tests", func() {
 						RestartPolicy: corev1.RestartPolicyNever,
 						SecurityContext: &corev1.PodSecurityContext{
 							RunAsNonRoot: ptr.To(true),
-							// The image runs as curl_user (UID 100). runAsNonRoot
-							// can only be checked against a numeric UID.
-							RunAsUser:      ptr.To[int64](100),
+							// The image runs as curl_user, whose non-numeric
+							// name cannot be verified against runAsNonRoot,
+							// so a numeric UID is required. On OpenShift, SCC
+							// admission only accepts UIDs inside the range
+							// assigned to the namespace.
+							RunAsUser:      ptr.To(curlPodUID(ctx, namespace)),
 							SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 						},
 						Containers: []corev1.Container{{
@@ -1010,6 +1020,30 @@ func serviceAccountToken(serviceAccountName, namespace string) (string, error) {
 	gomega.Eventually(verifyTokenCreation).Should(gomega.Succeed())
 
 	return out, err
+}
+
+// curlPodUID returns the UID the curl-metrics pod must run as. The
+// curlimages/curl image runs as curl_user, whose non-numeric name cannot be
+// verified against runAsNonRoot, so a numeric runAsUser is required. On
+// OpenShift, SCC admission rejects UIDs outside the range assigned to the
+// namespace through the openshift.io/sa.scc.uid-range annotation
+// ("<start>/<count>"), so use the first UID of that range when present and
+// fall back to the image user's UID (100) elsewhere.
+func curlPodUID(ctx context.Context, namespace string) int64 {
+	const imageUserUID = 100
+	var ns corev1.Namespace
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
+		return imageUserUID
+	}
+	start, _, found := strings.Cut(ns.Annotations["openshift.io/sa.scc.uid-range"], "/")
+	if !found {
+		return imageUserUID
+	}
+	uid, err := strconv.ParseInt(start, 10, 64)
+	if err != nil || uid <= 0 {
+		return imageUserUID
+	}
+	return uid
 }
 
 // getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.

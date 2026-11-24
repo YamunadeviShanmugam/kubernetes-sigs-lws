@@ -93,6 +93,36 @@ func ExpectValidServices(ctx context.Context, k8sClient client.Client, leaderWor
 	}, Timeout, Interval).Should(gomega.Equal(true))
 }
 
+// ExpectValidSurgeServices verifies that a valid headless service exists for
+// each group ordinal in [start, end), e.g. the MaxSurge ordinals the
+// controller creates while a rollout is in flight.
+//
+// It intentionally does not count the services in the namespace: during an
+// ordinal rolling update the controller may foreground-delete stale leader
+// pods to advance the rollout past pending ordinals, and garbage collection
+// briefly removes the headless services of those base ordinals until their
+// replacement pods are created. The total service count is therefore not
+// stable while the surge is in flight, while the surge replicas' own services
+// must exist for as long as the surge is.
+func ExpectValidSurgeServices(ctx context.Context, k8sClient client.Client, leaderWorkerSet *leaderworkerset.LeaderWorkerSet, start, end int) {
+	gomega.Eventually(func() error {
+		for i := start; i < end; i++ {
+			name := fmt.Sprintf("%s-%s", leaderWorkerSet.Name, strconv.Itoa(i))
+			var headlessService corev1.Service
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: leaderWorkerSet.Namespace}, &headlessService); err != nil {
+				return err
+			}
+			if _, err := validateService(headlessService, name, map[string]string{
+				leaderworkerset.SetNameLabelKey:    leaderWorkerSet.Name,
+				leaderworkerset.GroupIndexLabelKey: strconv.Itoa(i),
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, Timeout, Interval).Should(gomega.Succeed())
+}
+
 func validateService(headlessService corev1.Service, serviceName string, wantSelector map[string]string) (bool, error) {
 	if headlessService.Spec.ClusterIP != "None" {
 		return false, errors.New("service type mismatch")
